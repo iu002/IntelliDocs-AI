@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.log
+
+# Environment
+.env
+.venv/
+
+# VS Code
+.vscode/
+
+# Temporary files
+temp/
+*.tmp
+
+# Uploaded files
+uploads/
+backend/uploads/
+
+# Vector database
+vector_db/
+backend/vector_db/
+
+# Python cache
+.pytest_cache/
