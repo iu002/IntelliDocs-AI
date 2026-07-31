@@ -11,25 +11,42 @@ logger = logging.getLogger(__name__)
 
 
 def answer_question(question: str) -> dict[str, Any]:
-    """Retrieve relevant chunks, build a prompt, and return a placeholder LLM response."""
+    """Retrieve relevant chunks, build prompt, and generate answer."""
+
     logger.info("Starting RAG pipeline for question: %s", question)
 
-    context_chunks: list[dict[str, Any]] = retrieve_context(question, top_k=5)
+    context_chunks = retrieve_context(question, top_k=5)
+
+    print("\n========== RETRIEVED CONTEXT ==========")
+    print(context_chunks)
+    print("=======================================\n")
+
     context_text: list[str] = []
 
-    for chunk in context_chunks:
-        if isinstance(chunk, dict):
-            content: Any = chunk.get("content")
-            if isinstance(content, str):
-                context_text.append(content)
-            elif isinstance(content, list):
-                context_text.extend([str(item) for item in content])
+    # Extract content safely
+    if isinstance(context_chunks, list):
+        for chunk in context_chunks:
+            if isinstance(chunk, dict):
+                content = chunk.get("content", "")
+                if content:
+                    context_text.append(str(content))
 
-    prompt: str = build_prompt(question, context_text)
-    logger.info("Built prompt with %s context chunk(s).", len(context_text))
+            elif isinstance(chunk, str):
+                context_text.append(chunk)
 
-    # Generate the final answer with the Gemini-backed LLM service.
-    answer: str = llm_service.generate_answer(prompt)
+    logger.info("Retrieved %d context chunks.", len(context_text))
+
+    print("\n========== CONTEXT TEXT ==========")
+    print(context_text)
+    print("==================================\n")
+
+    prompt = build_prompt(question, context_text)
+
+    print("\n========== FINAL PROMPT ==========")
+    print(prompt)
+    print("==================================\n")
+
+    answer = llm_service.generate_answer(prompt)
 
     return {
         "answer": answer,

@@ -8,12 +8,17 @@ from typing import Any, Final
 
 try:
     from dotenv import load_dotenv
-except ImportError:  # pragma: no cover - handled at runtime
+except ImportError:
     load_dotenv = None
 
+# `google.generativeai` (the "old"/legacy SDK) reached end-of-life on
+# Nov 30, 2025 and is no longer supported. If it's installed at all it may
+# still work for a while, but the officially supported package going
+# forward is `google-genai` (imported as `from google import genai`).
+# Run: pip uninstall google-generativeai && pip install google-genai
 try:
-    import google.generativeai as genai
-except ImportError:  # pragma: no cover - handled at runtime
+    from google import genai
+except ImportError:
     genai = None
 
 logger = logging.getLogger(__name__)
@@ -21,67 +26,78 @@ logger = logging.getLogger(__name__)
 if load_dotenv is not None:
     load_dotenv()
 
-MODEL_NAME: Final[str] = "gemini-2.0-flash"
+MODEL_NAME: Final[str] = "gemini-3.6-flash"
 MAX_RETRIES: Final[int] = 3
 
 
 def _extract_context_answer(prompt: str) -> str:
-    """Extract the context snippet from a prompt to build a fallback answer."""
-    context_match = re.search(r"Context:\s*(.+)", prompt, re.DOTALL | re.IGNORECASE)
+    context_match = re.search(
+        r"={5,}\s*DOCUMENT\s*={5,}\s*(.*?)\s*={5,}",
+        prompt,
+        re.DOTALL | re.IGNORECASE,
+    )
+
     if context_match:
-        context_text = context_match.group(1).strip()
-        if context_text:
-            cleaned_lines = [line.strip() for line in context_text.splitlines() if line.strip()]
-            return " ".join(cleaned_lines)
+        return context_match.group(1).strip()
+
     return ""
 
 
-def _build_fallback_answer(prompt: str) -> str:
-    """Build a context-based fallback answer when Gemini is unavailable."""
-    context_answer = _extract_context_answer(prompt)
-    if not context_answer:
-        return "I don't have enough document context to answer this question yet."
+def _build_fallback_answer(prompt: str, error: Exception | None = None) -> str:
+    context = _extract_context_answer(prompt)
 
-    return f"Based on the available context, {context_answer}"
+    if not context:
+        return "I don't have enough document context to answer this question."
+
+    detail = f" ({error})" if error else ""
+    logger.warning("Gemini call failed even though context was present%s", detail)
+    return (
+        "I found relevant document context, but couldn't reach Gemini to "
+        f"generate an answer{detail}. Please check the GEMINI_API_KEY and "
+        "google-genai setup."
+    )
 
 
 @lru_cache(maxsize=1)
-def get_model() -> Any:
-    """Create and cache the Gemini model instance."""
+def get_client() -> Any:
     if genai is None:
-        raise RuntimeError("google-generativeai is required for Gemini integration.")
+        raise RuntimeError(
+            "google-genai is not installed. Run: pip install google-genai"
+        )
 
-    api_key: str | None = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("GEMINI_API_KEY")
+
     if not api_key:
-        raise ValueError("GEMINI_API_KEY is not set. Please add it to your .env file.")
+        raise ValueError("GEMINI_API_KEY not found.")
 
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel(MODEL_NAME)
+    return genai.Client(api_key=api_key)
 
 
 def generate_answer(prompt: str) -> str:
-    """Generate a response from Gemini with basic retry support."""
-    logger.info("Generating Gemini response for prompt length: %s", len(prompt))
+    logger.info("Generating Gemini response...")
 
     try:
-        model: Any = get_model()
-    except ValueError as exc:
-        logger.warning("Gemini initialization failed: %s", exc)
-        return _build_fallback_answer(prompt)
-    except RuntimeError as exc:
-        logger.warning("Gemini service unavailable: %s", exc)
-        return _build_fallback_answer(prompt)
+        client = get_client()
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    except Exception as exc:
+        logger.exception(exc)
+        return _build_fallback_answer(prompt, error=exc)
+
+    last_error: Exception | None = None
+    for attempt in range(MAX_RETRIES):
         try:
-            response = model.generate_content(prompt)
-            answer_text = getattr(response, "text", "") or ""
-            if answer_text.strip():
-                return answer_text.strip()
-            break
-        except Exception as exc:  # pragma: no cover - defensive handling
-            logger.warning("Gemini attempt %s failed: %s", attempt, exc)
-            if attempt == MAX_RETRIES:
-                return _build_fallback_answer(prompt)
+            response = client.models.generate_content(
+                model=MODEL_NAME,
+                contents=prompt,
+            )
 
-    return _build_fallback_answer(prompt)
+            answer = getattr(response, "text", "")
+
+            if answer:
+                return answer.strip()
+
+        except Exception as exc:
+            last_error = exc
+            logger.exception("Gemini request failed (attempt %d/%d)", attempt + 1, MAX_RETRIES)
+
+    return _build_fallback_answer(prompt, error=last_error)

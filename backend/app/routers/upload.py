@@ -6,53 +6,64 @@ from typing import Any
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 
-from backend.services.file_service import save_uploaded_file
+from backend.services.file_service import UPLOAD_DIRECTORY, save_uploaded_file
+from backend.services.indexing_service import index_document
 
 logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 
 class UploadResponse(BaseModel):
-    """Response schema shown in Swagger for successful uploads."""
-
-    success: bool = Field(default=True, description="Indicates whether the upload succeeded")
-    filename: str = Field(..., description="The saved filename")
-    original_filename: str = Field(..., description="The original uploaded filename")
-    file_type: str = Field(..., description="The normalized file extension")
-    file_size: str = Field(..., description="The formatted file size")
-    message: str = Field(default="Upload successful", description="Status message")
+    success: bool
+    filename: str
+    original_filename: str
+    file_type: str
+    file_size: str
+    message: str
 
 
 @router.post(
     "/upload",
-    status_code=status.HTTP_201_CREATED,
     response_model=UploadResponse,
-    responses={
-        status.HTTP_400_BAD_REQUEST: {"description": "Bad request"},
-        status.HTTP_413_REQUEST_ENTITY_TOO_LARGE: {"description": "File too large"},
-        status.HTTP_415_UNSUPPORTED_MEDIA_TYPE: {"description": "Unsupported file type"},
-        status.HTTP_500_INTERNAL_SERVER_ERROR: {"description": "Internal server error"},
-    },
+    status_code=status.HTTP_201_CREATED,
 )
-async def upload_file(file: UploadFile = File(...)) -> UploadResponse:
-    """Accept and save a supported document file."""
-    logger.info("Upload request received for: %s", file.filename)
-
+async def upload_file(file: UploadFile = File(...)):
     try:
-        saved_file: dict[str, Any] = await save_uploaded_file(file)
+
+        # Save file
+        saved = await save_uploaded_file(file)
+
+        # NOTE: previously this was built as the relative string
+        # "backend/uploads/{filename}", which only resolves correctly when
+        # uvicorn's current working directory happens to be the parent of
+        # the `backend` package. Any other launch context (IDE run
+        # configs, a different cwd, Docker, Vercel, etc.) made this path
+        # not exist, so index_document() raised FileNotFoundError here,
+        # producing an intermittent 500 that the frontend showed as
+        # "Upload Failed" even though the file itself saved fine. Reuse
+        # the same absolute directory file_service already saved into.
+        upload_path = str(UPLOAD_DIRECTORY / saved["filename"])
+
+        logger.info(f"Indexing file: {upload_path}")
+
+        # Index document
+        result = index_document(upload_path)
+
+        logger.info(result)
+
         return UploadResponse(
             success=True,
-            filename=saved_file.get("filename", ""),
-            original_filename=saved_file.get("original_filename", ""),
-            file_type=saved_file.get("file_type", ""),
-            file_size=saved_file.get("file_size", ""),
-            message=saved_file.get("message", "Upload successful"),
+            filename=saved["filename"],
+            original_filename=saved["original_filename"],
+            file_type=saved["file_type"],
+            file_size=saved["file_size"],
+            message="Upload & Indexed Successfully",
         )
-    except HTTPException:
-        raise
-    except Exception as exc:  # pragma: no cover - defensive handling
-        logger.exception("Unexpected upload error: %s", exc)
+
+    except Exception as e:
+        logger.exception(e)
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unable to process the upload request.",
-        ) from exc
+            status_code=500,
+            detail=str(e),
+        )
